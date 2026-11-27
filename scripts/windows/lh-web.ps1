@@ -11,12 +11,12 @@ param(
 Invoke-LhLauncher {
 	$config = Get-LhConfig -AppDir $AppDir -Port $Port
 	$server = Initialize-LhServer $config
-	Write-LhStep "Opening $($config.Url) in the browser"
-	Start-Process $config.Url
-	if ($null -eq $server) { return }
-	Write-LhStep 'The server runs in this window; close it to stop the server'
-	Set-LhConsoleWindow Minimize
 	try {
+		Write-LhStep "Opening $($config.Url) in the browser"
+		Start-Process $config.Url
+		if ($null -eq $server) { return }
+		Write-LhStep 'The server runs in this window; close it to stop the server'
+		Set-LhConsoleWindow Minimize
 		$server.WaitForExit()
 	} finally {
 		Stop-LhServer $server

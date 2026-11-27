@@ -13,6 +13,9 @@ function Get-LhConfig {
 		[Parameter(Mandatory)][string]$AppDir,
 		[Parameter(Mandatory)][int]$Port
 	)
+	# Absolute even when the directory does not exist yet: later steps change
+	# the current directory, and a relative path would resolve elsewhere.
+	$AppDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AppDir)
 	$userData = Join-Path $env:APPDATA 'LearnHarness Fork'
 	[pscustomobject]@{
 		AppDir      = $AppDir
@@ -68,6 +71,18 @@ function Test-LhPortListening {
 	param([Parameter(Mandatory)][int]$Port)
 	$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 	return [bool]$listener
+}
+
+# True when the URL serves the LearnHarness page (its <title>), so a listener
+# from another application is never mistaken for it.
+function Test-LhServerIsLearnHarness {
+	param([Parameter(Mandatory)][string]$Url)
+	try {
+		$page = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 5
+		return ($page.Content -match '<title>Learning Harness</title>')
+	} catch {
+		return $false
+	}
 }
 
 # Any HTTP response (including 4xx/5xx) means the server is up.
@@ -207,16 +222,47 @@ function Stop-LhServer {
 	& taskkill.exe /PID $Process.Id /T /F | Out-Null
 }
 
-# Updates and starts the server unless one already listens on the port.
+# Returns $true to reuse a LearnHarness server already on the URL, $false when
+# the port is free, and throws when another application holds the port.
+function Test-LhReusableServer {
+	param([Parameter(Mandatory)]$Config)
+	if (Test-LhServerIsLearnHarness $Config.Url) {
+		Write-LhStep "LearnHarness already runs on $($Config.Url); using it without updating"
+		return $true
+	}
+	if (Test-LhPortListening $Config.Port) {
+		throw "Port $($Config.Port) is used by another application; stop it or pass -Port"
+	}
+	return $false
+}
+
+# Updates and starts the server unless LearnHarness already runs on the URL.
+# A per-user mutex lets only one launcher prepare at a time (npm ci deletes
+# node_modules, so two at once would break the other's build); a launcher
+# that waited checks again and reuses the server the first one started.
 # Returns the node process this call started, or $null when it reused one.
 function Initialize-LhServer {
 	param([Parameter(Mandatory)]$Config)
-	if (Test-LhPortListening $Config.Port) {
-		Write-LhStep "A server already listens on port $($Config.Port); using it without updating"
-		return $null
+	$mutex = New-Object System.Threading.Mutex($false, 'Local\LearnHarnessForkLauncher')
+	try {
+		$acquired = $false
+		try {
+			if (-not $mutex.WaitOne(0)) {
+				Write-LhStep 'Another launcher is preparing; waiting for it'
+				[void]$mutex.WaitOne()
+			}
+			$acquired = $true
+		} catch [System.Threading.AbandonedMutexException] {
+			# The previous holder exited without releasing; we own it now.
+			$acquired = $true
+		}
+		if (Test-LhReusableServer $Config) { return $null }
+		Update-LhApp $Config
+		return Start-LhServer $Config
+	} finally {
+		if ($acquired) { $mutex.ReleaseMutex() }
+		$mutex.Dispose()
 	}
-	Update-LhApp $Config
-	return Start-LhServer $Config
 }
 
 Add-Type -Namespace LhLauncher -Name Console -MemberDefinition @'
